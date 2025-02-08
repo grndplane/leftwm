@@ -108,12 +108,11 @@ impl LayoutManager {
         };
 
         // set the current layout to the default layout for workspaces that have one configured, if in workspace mode
-        if config.layout_mode() == LayoutMode::Workspace {
-            for (i, ws) in config.workspaces().unwrap_or_default().iter().enumerate() {
-                if let Some(default_layout) = &ws.default_layout {
-                    let wsid = i + 1;
-                    layout_manager.set_layout(wsid, wsid, default_layout);
-                }
+          // set the current layout to the default layout for workspaces that have one configured
+        for (i, ws) in config.workspaces().unwrap_or_default().iter().enumerate() {
+            if let Some(default_layout) = &ws.default_layout {
+                let wsid = i + 1;
+                layout_manager.set_layout(wsid, wsid, default_layout);
             }
         }
 
