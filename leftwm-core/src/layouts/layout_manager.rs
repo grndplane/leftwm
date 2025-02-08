@@ -2,27 +2,171 @@ use crate::{config::Config, utils::helpers::cycle_vec};
 use leftwm_layouts::Layout;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
 use super::LayoutMode;
-
 /// The [`LayoutManager`] holds the actual set of [`Layout`].
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LayoutManager {
-    /// `LayoutMode` to be used when applying layouts
+    /// LayoutMode to be used when applying layouts
     mode: LayoutMode,
-
     /// All the available layouts. Loaded from the config and
     /// to be unchanged during runtime. The layout manager shall make
     /// copies of those layouts for the specific workspaces and tags.
     available_layouts: Vec<Layout>,
-
     /// All the available layouts per workspace. Different workspaces may
     /// have different available layouts, if configured that way. If a
     /// workspace does not have its own set of available layouts, the
     /// global available layouts from [`available_layouts`] will be used instead.
     available_layouts_per_ws: HashMap<usize, Vec<Layout>>,
-
     /// The actual, modifiable layouts grouped by either
+    /// Workspace or Tag, depending on the configured [`LayoutMode`].
+    layouts: HashMap<usize, Vec<Layout>>,
+}
+impl LayoutManager {
+    /// Create a new [`LayoutManager`] from the config
+    pub fn new(config: &impl Config) -> Self {
+        let mut available_layouts: Vec<Layout> = Vec::new();
+        tracing::trace!("Looking for layouts named: {:?}", config.layouts());
+        for name in config.layouts() {
+            if let Some(def) = config
+                .layout_definitions()
+                .iter()
+                .find(|def| def.name == name)
+            {
+                available_layouts.push(def.clone());
+            } else {
+                tracing::warn!("There is no Layout with the name {:?}", name);
+            }
+        }
+        let mut available_layouts_per_ws: HashMap<usize, Vec<Layout>> = HashMap::new();
+        for (i, ws) in config.workspaces().unwrap_or_default().iter().enumerate() {
+            if let Some(ws_layout_names) = &ws.layouts {
+                let wsid = i + 1;
+                for ws_layout_name in ws_layout_names {
+                    if let Some(layout) = config
+                        .layout_definitions()
+                        .iter()
+                        .find(|layout| layout.name == *ws_layout_name)
+                    {
+                        available_layouts_per_ws
+                            .entry(wsid)
+                            .and_modify(|layouts| layouts.push(layout.clone()))
+                            .or_insert_with(|| vec![layout.clone()]);
+                    } else {
+                        tracing::warn!("There is no Layout with the name {:?}, but was configured on workspace {:?}", ws_layout_name, wsid);
+                    }
+                }
+            }
+            if let Some(default_layout) = &ws.default_layout {
+                let wsid = i + 1;
+                if let Some(layout) = config
+                    .layout_definitions()
+                    .iter()
+                    .find(|layout| layout.name == *default_layout)
+                {
+                    // add the default layout to the available layouts if it's not already there
+                    available_layouts_per_ws
+                        .entry(wsid)
+                        .and_modify(|layouts| {
+                            if !layouts.iter().any(|l| l.name == layout.name) {
+                                layouts.push(layout.clone());
+                            }
+                        })
+                        .or_insert_with(|| vec![layout.clone()]);
+                } else {
+                    tracing::warn!("There is no Layout with the name {:?}, but was configured as default on workspace {:?}", default_layout, wsid);
+                }
+            }
+        }
+
+        if available_layouts.is_empty() {
+	@@ -80,12 +100,24 @@ impl LayoutManager {
+            available_layouts_per_ws
+        );
+
+        let mut layout_manager = Self {
+            mode: config.layout_mode(),
+            available_layouts,
+            available_layouts_per_ws,
+            layouts: HashMap::new(),
+        };
+
+        // set the current layout to the default layout for workspaces that have one configured, if in workspace mode
+        if config.layout_mode() == LayoutMode::Workspace {
+            for (i, ws) in config.workspaces().unwrap_or_default().iter().enumerate() {
+                if let Some(default_layout) = &ws.default_layout {
+                    let wsid = i + 1;
+                    layout_manager.set_layout(wsid, wsid, default_layout);
+                }
+            }
+        }
+
+        layout_manager
+    }
+
+    pub fn restore(&mut self, old: &LayoutManager) {
+	@@ -241,6 +273,41 @@ mod tests {
+                    layouts: Some(vec![]),
+                    ..Default::default()
+                },
+                // case where default is available globally
+                crate::config::Workspace {
+                    default_layout: Some(layouts::MAIN_AND_HORIZONTAL_STACK.to_string()),
+                    ..Default::default()
+                },
+                // case where default is available to the workspace, but not globally
+                crate::config::Workspace {
+                    layouts: Some(vec![
+                        layouts::CENTER_MAIN.to_string(),
+                        layouts::CENTER_MAIN_BALANCED.to_string(),
+                        layouts::MAIN_AND_VERT_STACK.to_string(),
+                    ]),
+                    default_layout: Some(layouts::MAIN_AND_VERT_STACK.to_string()),
+                    ..Default::default()
+                },
+                // case where the default exists but is not previously available
+                crate::config::Workspace {
+                    default_layout: Some(layouts::FIBONACCI.to_string()),
+                    ..Default::default()
+                },
+                // same as above, but workspace explicitly given no layouts
+                crate::config::Workspace {
+                    layouts: Some(vec![]),
+                    default_layout: Some(layouts::EVEN_VERTICAL.to_string()),
+                    ..Default::default()
+                },
+                // case where default is available globally, but not locally
+                crate::config::Workspace {
+                    layouts: Some(vec![
+                        layouts::CENTER_MAIN_BALANCED.to_string(),
+                        layouts::MAIN_AND_DECK.to_string(),
+                    ]),
+                    default_layout: Some(layouts::CENTER_MAIN.to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+	@@ -262,4 +329,20 @@ mod tests {
+        layout_manager.set_layout(2, 1, EVEN_VERTICAL);
+        assert_eq!(EVEN_VERTICAL, &layout_manager.layout(2, 1).name);
+    }
+
+    #[test]
+    fn default_layouts_should_be_set() {
+        let mut layout_manager = layout_manager();
+        assert_eq!(
+            layouts::MAIN_AND_HORIZONTAL_STACK,
+            &layout_manager.layout(4, 1).name
+        );
+        assert_eq!(
+            layouts::MAIN_AND_VERT_STACK,
+            &layout_manager.layout(5, 1).name
+        );
+        assert_eq!(layouts::FIBONACCI, &layout_manager.layout(6, 1).name);
+        assert_eq!(layouts::EVEN_VERTICAL, &layout_manager.layout(7, 1).name);
+        assert_eq!(layouts::CENTER_MAIN, &layout_manager.layout(8, 1).name);
+    }
+}/// The actual, modifiable layouts grouped by either
     /// Workspace or Tag, depending on the configured [`LayoutMode`].
     layouts: HashMap<usize, Vec<Layout>>,
 }
